@@ -207,6 +207,109 @@ def run_multiday(
 
 
 # ---------------------------------------------------------------------------
+# Walk-forward optimization
+# ---------------------------------------------------------------------------
+
+def run_walkforward(
+    n_days:     int  = 20,
+    ticker:     str  = "IF2401.CFFEX",
+    is_futures: bool = True,
+    is_window:  int  = 10,
+    oos_window: int  = 2,
+) -> pd.DataFrame:
+    """
+    Walk-forward parameter optimization.
+
+    Grid-searches entry_z × max_hold on IS window, applies best params
+    to next OOS window, rolls forward. Reports OOS-only metrics.
+    """
+    entry_z_grid  = [0.8, 1.0, 1.2, 1.5, 2.0]
+    max_hold_grid = [10, 15, 20, 30, 40]
+
+    dates    = pd.bdate_range("2024-01-02", periods=n_days).strftime("%Y-%m-%d").tolist()
+    date_idx = {d: i for i, d in enumerate(dates)}
+    oos_rows = []
+
+    print(f"\n  Grid: entry_z×{entry_z_grid}  max_hold×{max_hold_grid}  "
+          f"({len(entry_z_grid)*len(max_hold_grid)} combos per IS window)")
+
+    for oos_start in range(is_window, n_days, oos_window):
+        is_dates  = dates[oos_start - is_window : oos_start]
+        oos_dates = dates[oos_start : oos_start + oos_window]
+        if not oos_dates:
+            break
+
+        # ── IS grid search ──────────────────────────────────────────────
+        best_sharpe = -np.inf
+        best_ez, best_mh = 1.5, 20
+
+        for ez in entry_z_grid:
+            for mh in max_hold_grid:
+                p = MarketParams(
+                    instrument        = "futures" if is_futures else "stock",
+                    entry_z           = ez,
+                    exit_z            = 0.3,
+                    max_hold          = mh,
+                    use_regime_filter = False,   # skip for speed during grid search
+                )
+                daily_pnls = []
+                for d in is_dates:
+                    r = run_day(d, ticker=ticker, is_futures=is_futures,
+                                seed=date_idx[d], verbose=False, params=p)
+                    daily_pnls.append(float(r["pnl"].sum()))
+                s = pd.Series(daily_pnls)
+                sh = float(np.sqrt(252) * s.mean() / s.std()) if s.std() > 0 else 0.0
+                if sh > best_sharpe:
+                    best_sharpe = sh
+                    best_ez, best_mh = ez, mh
+
+        # ── OOS evaluation ───────────────────────────────────────────────
+        p_oos = MarketParams(
+            instrument = "futures" if is_futures else "stock",
+            entry_z    = best_ez,
+            exit_z     = 0.3,
+            max_hold   = best_mh,
+        )
+        oos_pnls, oos_ics = [], []
+        for d in oos_dates:
+            r = run_day(d, ticker=ticker, is_futures=is_futures,
+                        seed=date_idx[d], verbose=False, params=p_oos)
+            oos_pnls.append(float(r["pnl"].sum()))
+            oos_ics.append(float(r["ic_all"].get(10, np.nan)))
+
+        row = {
+            "oos_start":   oos_dates[0],
+            "oos_end":     oos_dates[-1],
+            "entry_z":     best_ez,
+            "max_hold":    best_mh,
+            "is_sharpe":   round(best_sharpe, 2),
+            "oos_pnl":     round(sum(oos_pnls), 1),
+            "oos_ic_mean": round(float(np.nanmean(oos_ics)), 4),
+        }
+        oos_rows.append(row)
+        print(f"  OOS {row['oos_start']}–{row['oos_end']}  "
+              f"params=(ez={best_ez}, mh={best_mh})  "
+              f"IS_sh={best_sharpe:+.2f}  OOS_pnl={row['oos_pnl']:+.0f}  "
+              f"IC@10={row['oos_ic_mean']:+.4f}")
+
+    df = pd.DataFrame(oos_rows)
+
+    hdr("Walk-Forward Summary  (IS=10d  OOS=2d)")
+    print(df.to_string(index=False))
+
+    all_pnl    = pd.Series([r["oos_pnl"] for r in oos_rows])
+    oos_sharpe = float(np.sqrt(252) * all_pnl.mean() / all_pnl.std()) if all_pnl.std() > 0 else 0.0
+    n_prof     = int((all_pnl > 0).sum())
+    mean_ic    = float(np.nanmean([r["oos_ic_mean"] for r in oos_rows]))
+
+    print(f"\n  OOS-concatenated Sharpe : {oos_sharpe:+.2f}")
+    print(f"  Profitable OOS windows  : {n_prof}/{len(oos_rows)}")
+    print(f"  Mean OOS IC@10          : {mean_ic:+.4f}")
+
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -216,7 +319,9 @@ def main() -> None:
     ap.add_argument("--stock",    action="store_true", help="use stock mode (long-only T+1)")
     ap.add_argument("--date",     default="2024-01-02")
     ap.add_argument("--ticker",   default="IF2401.CFFEX")
-    ap.add_argument("--days",     type=int, default=20)
+    ap.add_argument("--days",        type=int, default=20)
+    ap.add_argument("--walkforward", action="store_true")
+    ap.add_argument("--etf",         action="store_true", help="include ETF basis signal")
     args = ap.parse_args()
 
     is_futures = not args.stock
@@ -230,10 +335,15 @@ def main() -> None:
     print("  Data       : Synthetic Chinese L2 (3-second, 10-level LOB)")
 
     hdr("Single Day Deep-Dive")
-    run_day(date=args.date, ticker=ticker, is_futures=is_futures, verbose=True)
+    run_day(date=args.date, ticker=ticker, is_futures=is_futures,
+            verbose=True, use_etf=args.etf)
 
     if args.multiday:
         run_multiday(n_days=args.days, ticker=ticker, is_futures=is_futures)
+
+    if args.walkforward:
+        hdr("Walk-Forward Optimization")
+        run_walkforward(n_days=args.days, ticker=ticker, is_futures=is_futures)
 
     hdr("Done")
     print("  Next steps:")
