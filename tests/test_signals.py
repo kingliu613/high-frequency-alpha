@@ -61,3 +61,32 @@ class TestPriceLimitSignal:
         assert isinstance(sig, pd.Series)
         assert sig.index.equals(df.index)
         assert sig.name == "price_limit"
+
+
+class TestEtfBasisSignal:
+
+    def test_returns_series_same_index(self):
+        df  = simulate_lob_day(seed=0)
+        etf = simulate_etf_series(df, seed=0)
+        sig = etf_basis_signal(df, etf)
+        assert isinstance(sig, pd.Series)
+        assert sig.index.equals(df.index)
+        assert sig.name == "etf_basis"
+
+    def test_sign_is_mean_reverting(self):
+        """Positive ETF premium → negative signal (sell expensive ETF)."""
+        df  = simulate_lob_day(seed=0)
+        mid = (df["bid_px_1"] + df["ask_px_1"]) / 2.0
+        # Force ETF price 2% above mid (expensive ETF)
+        etf_expensive = mid * 1.02
+        sig = etf_basis_signal(df, etf_expensive)
+        # After burn-in (200 ticks), signal should be negative
+        assert float(sig.iloc[250:].mean()) < 0, "Expensive ETF should give negative signal"
+
+    def test_zero_signal_at_par(self):
+        """ETF at exact NAV → basis = 0 → signal = 0."""
+        df  = simulate_lob_day(seed=0)
+        mid = (df["bid_px_1"] + df["ask_px_1"]) / 2.0
+        sig = etf_basis_signal(df, mid)   # ETF = mid exactly
+        # rolling std of a zero series is 0, so fillna(0) → all zeros
+        assert (sig.abs() < 1e-9).all()

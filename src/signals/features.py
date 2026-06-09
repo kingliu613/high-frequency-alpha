@@ -241,6 +241,26 @@ def price_limit_signal(
     return sig.rename("price_limit")
 
 
-# Stub — full implementation in Task 4
-def etf_basis_signal(lob_df: pd.DataFrame, etf_series) -> "pd.Series":
-    raise NotImplementedError("etf_basis_signal not yet implemented")
+# ---------------------------------------------------------------------------
+# ETF basis signal  (mean-reversion vs NAV)
+# ---------------------------------------------------------------------------
+
+def etf_basis_signal(lob_df: pd.DataFrame, etf_series: pd.Series) -> pd.Series:
+    """
+    ETF premium/discount to NAV (underlying mid-price) as mean-reversion signal.
+
+        basis(t) = ETF_price(t) / mid(t) - 1
+
+    Signal = -basis: if ETF trades expensively vs basket, expect reversion down.
+
+    Reference: ALPHA_NOTES §2.5 — ETF NAV spread arbitrage.
+    Requires T+0 instrument (ETF 510300 / 510500 is T+0 in China).
+    """
+    mid = (lob_df["bid_px_1"] + lob_df["ask_px_1"]).astype(float) / 2.0
+    etf = etf_series.reindex(lob_df.index).ffill()
+
+    basis = etf / mid.replace(0.0, np.nan) - 1.0
+    sig   = -basis  # mean-reversion: expensive ETF → negative signal
+
+    roll_std = sig.rolling(200, min_periods=50).std()
+    return (sig / roll_std.replace(0.0, np.nan)).fillna(0.0).rename("etf_basis")
