@@ -54,7 +54,7 @@ def simulate_lob_day(
     daily_vol: float = 0.015,
     is_futures: bool = True,
     seed: int = 42,
-    signal_strength: float = 0.05,
+    signal_strength: float = 0.01,
 ) -> pd.DataFrame:
     """
     Generate one day of synthetic Chinese L2 LOB snapshots.
@@ -70,6 +70,13 @@ def simulate_lob_day(
 
     signal_strength controls coupling between latent order-flow and price.
     Higher values produce stronger/more detectable alpha signals.
+
+    WARNING — circular data bias: the same latent `flow` variable drives
+    both LOB features (depth tilt, trade direction) AND price drift, so
+    any signal derived from the LOB is guaranteed to have IC > 0. This
+    inflates IC, Sharpe, and annualised return vs real OOS data.
+    Use signal_strength=0.0 as a null baseline; use real L2 data for
+    any claims about live performance.
     """
     rng = np.random.default_rng(seed)
     tss = _session_timestamps(date)
@@ -139,6 +146,14 @@ def simulate_lob_day(
         row["last_price"]  = a1 if is_buy else b1
         row["last_volume"] = trd_vol
 
+        # Executed volume consumes the hit side's top-of-book depth, so depth
+        # changes are mechanically consistent with trades (execution-rate and
+        # cancellation estimators would otherwise see pure noise).
+        if is_buy:
+            row["ask_vol_1"] = max(LOT, row["ask_vol_1"] - trd_vol)
+        else:
+            row["bid_vol_1"] = max(LOT, row["bid_vol_1"] - trd_vol)
+
         if is_buy:
             cum_buy  += trd_vol
         else:
@@ -175,6 +190,62 @@ def simulate_etf_series(lob_df: pd.DataFrame, seed: int = 0) -> pd.Series:
 
     etf_px = mid.values * (1.0 + premium)
     return pd.Series(etf_px, index=lob_df.index, name="etf_px")
+
+
+def simulate_close_auction_data(
+    ticker: str = "IF2401.CFFEX",
+    date: str = "2024-01-02",
+    day_close: float = 4000.0,
+    daily_vol: float = 0.015,
+    seed: int = 42,
+) -> tuple[pd.DataFrame, float]:
+    """
+    Generate closing call auction data (14:57–15:00), introduced on SSE/SZSE in 2018.
+
+    Mechanics:
+    - 14:57–15:00: orders accumulate, no cancellation
+    - 15:00: market clears at volume-maximising price → official close
+    - Imbalance is driven by a latent OVERNIGHT information gap, so the closing
+      imbalance predicts the next-day open (see close_auction_imbalance()).
+
+    Returns (close_df, close_price). `day_close` is the last continuous-session
+    mid; the auction nudges it by the latent overnight gap.
+    """
+    rng = np.random.default_rng(seed + 33333)
+    base = pd.Timestamp(date)
+    tss  = pd.date_range(
+        base + pd.Timedelta(hours=14, minutes=57),
+        base + pd.Timedelta(hours=15),
+        freq="3s",
+    )
+    n = len(tss)
+
+    # Latent overnight gap drives both the close print and the buy/sell tilt
+    overnight_gap = np.clip(rng.normal(0.0, daily_vol * 0.6), -0.05, 0.05)
+    close_price   = np.round(day_close * (1.0 + 0.3 * overnight_gap) / TICK) * TICK
+
+    fracs    = np.linspace(0.15, 1.0, n)
+    base_vol = 1_500_000
+    cum_buy  = np.zeros(n, dtype=int)
+    cum_sell = np.zeros(n, dtype=int)
+
+    for i, frac in enumerate(fracs):
+        noise = rng.lognormal(0, 0.3)
+        total = int(base_vol * frac * noise)
+        buy_frac = 0.5 + 0.4 * np.clip(overnight_gap / 0.05, -1.0, 1.0)
+        cum_buy[i]  = int(total * buy_frac)
+        cum_sell[i] = int(total * (1.0 - buy_frac))
+
+    df = pd.DataFrame({
+        "indicative_price": np.round(
+            np.linspace(day_close, close_price, n) / TICK) * TICK,
+        "cum_buy_vol":  cum_buy,
+        "cum_sell_vol": cum_sell,
+        "day_close":    day_close,
+        "ticker":       ticker,
+    }, index=pd.DatetimeIndex(tss, name="timestamp"))
+
+    return df, float(close_price)
 
 
 def simulate_auction_data(

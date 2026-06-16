@@ -7,10 +7,10 @@ import pytest
 from src.data.synthetic import simulate_lob_day, simulate_etf_series
 
 
-def test_signal_strength_default_is_005():
+def test_signal_strength_default_is_001():
     import inspect
     sig = inspect.signature(simulate_lob_day)
-    assert sig.parameters["signal_strength"].default == 0.05
+    assert sig.parameters["signal_strength"].default == 0.01
 
 
 def test_lob_vol_has_persistence():
