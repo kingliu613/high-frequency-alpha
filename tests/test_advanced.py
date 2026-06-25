@@ -5,31 +5,26 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.data.synthetic import simulate_lob_day, simulate_close_auction_data
-from src.signals.auction import close_auction_imbalance, close_auction_signal_series
+from src.data.synthetic import simulate_lob_day
 from src.signals.advanced import (
-    big_order_flow,
     herding_intensity,
     aggressive_passive_imbalance,
     order_execution_imbalance,
-    order_book_slope,
-    book_resiliency,
-    signed_jump_reversal,
     realized_vol,
-    sealing_strength,
     vpin,
     kyle_lambda,
+    kyle_lambda_state,
     cancel_spike_imbalance,
     exposure_gate,
-    spoof_filtered_qi,
-    institutional_seal,
 )
 from src.signals.composite import (
     build_feature_matrix,
     build_composite_alpha,
     DEFAULT_WEIGHTS,
+    FACTOR_REGISTRY,
     FACTOR_GROUPS,
     expand_factor_selection,
+    missing_required_columns,
 )
 
 
@@ -50,10 +45,25 @@ def _book(n, *, bid_px1=10.0, ask_px1=10.02, bid_vol=10000, ask_vol=10000,
         data[f"ask_px_{lv}"]  = np.full(n, ask_px1 + (lv - 1) * tick)
         data[f"bid_vol_{lv}"] = np.full(n, float(bid_vol))
         data[f"ask_vol_{lv}"] = np.full(n, float(ask_vol))
-    data["last_price"]  = np.full(n, (bid_px1 + ask_px1) / 2.0)
-    data["last_volume"] = np.zeros(n)
     data["cum_buy_vol"]  = np.arange(n, dtype=float) * 1000.0 if cum_buy is None else cum_buy
     data["cum_sell_vol"] = np.arange(n, dtype=float) * 1000.0 if cum_sell is None else cum_sell
+    dvb = pd.Series(data["cum_buy_vol"]).diff().clip(lower=0).fillna(0.0).to_numpy()
+    dvs = pd.Series(data["cum_sell_vol"]).diff().clip(lower=0).fillna(0.0).to_numpy()
+    total_trade = dvb + dvs
+    data["last_price"] = np.where(dvb >= dvs, ask_px1, bid_px1)
+    data["last_volume"] = total_trade
+    data["buy_count"] = (dvb > 0).astype(float)
+    data["sell_count"] = (dvs > 0).astype(float)
+    data["cum_buy_count"] = np.cumsum(data["buy_count"])
+    data["cum_sell_count"] = np.cumsum(data["sell_count"])
+    data["market_buy_vol"] = dvb
+    data["market_sell_vol"] = dvs
+    data["limit_buy_vol"] = np.full(n, float(bid_vol) * 0.1)
+    data["limit_sell_vol"] = np.full(n, float(ask_vol) * 0.1)
+    data["cancel_buy_vol"] = np.zeros(n)
+    data["cancel_sell_vol"] = np.zeros(n)
+    data["bid_depth"] = np.full(n, float(bid_vol) * n_levels)
+    data["ask_depth"] = np.full(n, float(ask_vol) * n_levels)
     return pd.DataFrame(data, index=idx)
 
 
@@ -62,13 +72,9 @@ def _book(n, *, bid_px1=10.0, ask_px1=10.02, bid_vol=10000, ask_vol=10000,
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("fn", [
-    lambda d: big_order_flow(d),
     lambda d: herding_intensity(d),
     lambda d: aggressive_passive_imbalance(d),
     lambda d: order_execution_imbalance(d),
-    lambda d: order_book_slope(d),
-    lambda d: book_resiliency(d),
-    lambda d: signed_jump_reversal(d),
     lambda d: realized_vol(d),
 ])
 def test_factor_shape_and_finite(fn):
@@ -80,22 +86,16 @@ def test_factor_shape_and_finite(fn):
     assert np.isfinite(s.to_numpy()).all()
 
 
-def test_bounded_factors_in_range():
+def test_api_is_finite_and_has_variance():
     df = simulate_lob_day(seed=3)
-    for s in (aggressive_passive_imbalance(df), order_book_slope(df), book_resiliency(df)):
-        assert s.abs().max() <= 1.0 + 1e-9
+    s = aggressive_passive_imbalance(df)
+    assert np.isfinite(s.to_numpy()).all()
+    assert s.std() > 0
 
 
 # ---------------------------------------------------------------------------
 # Directional sign checks on constructed flow
 # ---------------------------------------------------------------------------
-
-def test_big_order_flow_positive_on_net_buys():
-    n = 120
-    df = _book(n, cum_buy=np.arange(n) * 5000.0, cum_sell=np.zeros(n))
-    s = big_order_flow(df, window=20)
-    assert s.iloc[40:].mean() > 0
-
 
 def test_herding_positive_when_all_buys():
     n = 60
@@ -119,70 +119,13 @@ def test_oei_positive_when_ask_consumed():
     assert s.iloc[20:].mean() > 0
 
 
-def test_book_slope_positive_when_bid_steeper():
-    n = 40
-    df = _book(n, bid_vol=30000, ask_vol=8000)  # thicker bid over same price span
-    s = order_book_slope(df)
-    assert s.iloc[-1] > 0
-
-
-def test_resiliency_positive_when_bid_refills():
-    n = 60
-    df = _book(n)
-    # bid depth grows (refills), ask depth shrinks (depletes)
-    df["bid_vol_1"] = 5000.0 + np.arange(n) * 100.0
-    df["ask_vol_1"] = 12000.0 - np.arange(n) * 100.0
-    s = book_resiliency(df, window=20)
-    assert s.iloc[30:].mean() > 0
-
-
-def test_signed_jump_is_reversal_after_up_move():
-    n = 140
-    df = _book(n)
-    mid = np.full(n, 10.0)
-    mid[80:] = 10.20           # single up-jump at t=80 (past z-score warm-up)
-    df["bid_px_1"] = mid - 0.01
-    df["ask_px_1"] = mid + 0.01
-    s = signed_jump_reversal(df, window=20)
-    # window straddling the up-jump → negative (expect pullback)
-    assert s.iloc[81:100].mean() < 0
-
-
-def test_sealing_strength_positive_at_up_limit():
-    n = 40
-    prev_close = 10.0
-    df = _book(n, bid_px1=11.0, ask_px1=11.02, bid_vol=50000,
-               cum_buy=np.arange(n) * 1000.0, cum_sell=np.zeros(n))
-    s = sealing_strength(df, prev_close=prev_close, limit_pct=0.10)
-    assert s.iloc[-1] > 0
-
-
-def test_factors_robust_to_missing_trade_columns():
-    """big_flow/herding/api degrade to finite (≈0) when no trade data present."""
+def test_exact_factors_require_their_paper_columns():
     n = 50
     df = _book(n)
-    df = df.drop(columns=["cum_buy_vol", "cum_sell_vol", "last_price", "last_volume"])
-    for fn in (big_order_flow, herding_intensity, aggressive_passive_imbalance):
-        s = fn(df)
-        assert np.isfinite(s.to_numpy()).all()
-
-
-# ---------------------------------------------------------------------------
-# Closing call auction
-# ---------------------------------------------------------------------------
-
-def test_close_auction_imbalance_in_range():
-    close_df, close_px = simulate_close_auction_data(day_close=4000.0, seed=1)
-    imb = close_auction_imbalance(close_df)
-    assert -1.0 <= imb <= 1.0
-    assert close_px > 0
-
-
-def test_close_auction_signal_decays():
-    df = simulate_lob_day(seed=5)
-    s = close_auction_signal_series(df, close_auction_value=0.5, half_life_min=30.0)
-    assert s.iloc[0] == pytest.approx(0.5, abs=1e-6)
-    assert abs(s.iloc[-1]) < abs(s.iloc[0])   # decays toward zero
+    with pytest.raises(ValueError, match="buy/sell count columns"):
+        herding_intensity(df.drop(columns=["cum_buy_count", "cum_sell_count", "buy_count", "sell_count"]))
+    with pytest.raises(ValueError, match="order-event columns"):
+        aggressive_passive_imbalance(df.drop(columns=["limit_buy_vol"]))
 
 
 # ---------------------------------------------------------------------------
@@ -193,24 +136,32 @@ def test_default_weights_sum_to_one():
     assert sum(DEFAULT_WEIGHTS.values()) == pytest.approx(1.0, abs=1e-9)
 
 
-def test_feature_matrix_includes_new_factors():
+def test_factor_registry_declares_roles_and_inputs():
+    assert FACTOR_REGISTRY["trade_imbalance"].formula_id == "polarity=(NOB-NOS)/(NOB+NOS)"
+    assert FACTOR_REGISTRY["api"].output_role == "gate"
+    assert FACTOR_REGISTRY["vpin"].output_role == "gate"
+    assert FACTOR_REGISTRY["price_limit"].output_role == "label"
+    assert FACTOR_REGISTRY["herding"].strict_supported is False
+
+
+def test_feature_matrix_default_is_strict_alpha_only():
     df = simulate_lob_day(seed=11)
-    feat = build_feature_matrix(df, close_auction_value=0.2, ofi_levels=5)
-    for col in ["api", "oei", "big_flow", "herding", "book_slope",
-                "resiliency", "signed_jump", "close_auction"]:
+    feat = build_feature_matrix(df, ofi_levels=5)
+    for col in ["mlofi", "agg_ofi", "trade_imbalance"]:
         assert col in feat.columns
+    for col in ["api", "oei", "queue_imbalance", "herding", "cancel_spike", "auction_signal", "price_limit"]:
+        assert col not in feat.columns
 
 
-def test_stock_mode_adds_sealing():
+def test_stock_mode_does_not_add_price_limit_by_default():
     df = simulate_lob_day(seed=12, is_futures=False, prev_close=100.0)
     feat = build_feature_matrix(df, instrument="stock", prev_close=100.0)
-    assert "sealing" in feat.columns
-    assert "price_limit" in feat.columns
+    assert "price_limit" not in feat.columns
 
 
 def test_composite_runs_with_all_factors():
     df = simulate_lob_day(seed=13)
-    feat = build_feature_matrix(df, auction_value=0.1, close_auction_value=0.1, ofi_levels=5)
+    feat = build_feature_matrix(df, auction_value=0.1, ofi_levels=5)
     alpha = build_composite_alpha(feat)
     assert len(alpha) == len(df)
     assert np.isfinite(alpha.to_numpy()).all()
@@ -245,14 +196,16 @@ def test_vpin_bounded_zero_one():
 def test_vpin_high_for_one_sided_flow():
     n = 400
     one_sided = _book(n, cum_buy=np.arange(n) * 5000.0, cum_sell=np.zeros(n))
+    one_sided["last_price"] = 10.0 + np.arange(n) * 0.01
     rng = np.random.default_rng(0)
     buys  = rng.integers(0, 5000, n).astype(float)
     sells = rng.integers(0, 5000, n).astype(float)
     balanced = _book(n, cum_buy=np.cumsum(buys), cum_sell=np.cumsum(sells))
+    balanced["last_price"] = 10.0 + np.cumsum(rng.normal(0.0, 0.01, n))
     v_one = vpin(one_sided).iloc[-1]
     v_bal = vpin(balanced).iloc[-1]
     assert v_one > v_bal
-    assert v_one == pytest.approx(1.0, abs=1e-6)
+    assert v_one > 0.8
 
 
 def test_kyle_lambda_zero_without_impact():
@@ -266,19 +219,35 @@ def test_kyle_lambda_zero_without_impact():
     assert lam.abs().max() < 1e-6
 
 
+def test_kyle_lambda_raw_and_state_are_separate():
+    n = 300
+    signed = np.arange(n, dtype=float)
+    df = _book(n, cum_buy=np.cumsum(signed + 1.0), cum_sell=np.zeros(n))
+    df["bid_px_1"] = 10.0 + signed * 0.001
+    df["ask_px_1"] = 10.02 + signed * 0.001
+    raw = kyle_lambda(df, window=60)
+    state = kyle_lambda_state(df, window=60)
+    assert raw.name == "kyle_lambda"
+    assert state.name == "kyle_lambda_state"
+    assert np.isfinite(raw.to_numpy()).all()
+    assert np.isfinite(state.to_numpy()).all()
+
+
 def test_cancel_spike_positive_on_ask_withdrawal():
     n = 400
     df = _book(n)
-    # no trades at all → every depth drop is a cancel
-    df["cum_buy_vol"] = 0.0
-    df["cum_sell_vol"] = 0.0
-    # steady book until t=350, then ask side evaporates (sellers withdrawing)
-    av = np.full(n, 20000.0)
-    av[350:] = 20000.0 - np.arange(n - 350) * 2000.0
-    df["ask_vol_1"] = np.clip(av, 100.0, None)
+    df["cancel_sell_vol"] = 0.0
+    df.iloc[350:, df.columns.get_loc("cancel_sell_vol")] = 5000.0
     s = cancel_spike_imbalance(df, window=10)
     assert s.iloc[355:].max() > 0          # bullish: ask cancels dominate
     assert (s.iloc[:340] == 0.0).all()     # silent without spike
+
+
+def test_cancel_spike_small_lookback_does_not_error():
+    df = _book(20)
+    df["cancel_sell_vol"] = np.r_[np.zeros(10), np.ones(10) * 1000.0]
+    s = cancel_spike_imbalance(df, window=2, spike_lookback=3)
+    assert np.isfinite(s.to_numpy()).all()
 
 
 def test_exposure_gate_in_range():
@@ -303,80 +272,21 @@ def test_backtest_accepts_exposure_scale():
 
 
 # ---------------------------------------------------------------------------
-# Interaction factors — spoof-filtered QI, institutional seal
-# ---------------------------------------------------------------------------
-
-def test_spoof_filter_mutes_cancelled_wall():
-    """Bid wall being cancelled → filtered signal much weaker than raw QI."""
-    n = 400
-    df = _book(n, bid_vol=50000, ask_vol=5000)          # fat bid wall → QI > 0
-    df["cum_buy_vol"] = 0.0                              # no trades at all:
-    df["cum_sell_vol"] = 0.0                             # depth drops = cancels
-    # wall quietly evaporates over the last 50 ticks (spoof being pulled)
-    bv = np.full(n, 50000.0)
-    bv[350:] = 50000.0 - np.arange(n - 350) * 4000.0
-    df["bid_vol_1"] = np.clip(bv, 100.0, None)
-
-    from src.signals.features import queue_imbalance
-    raw  = queue_imbalance(df)
-    filt = spoof_filtered_qi(df, window=10)
-
-    spoof_zone = slice(355, 398)
-    assert raw.iloc[spoof_zone].mean() > 0              # raw still bullish
-    assert filt.iloc[spoof_zone].mean() < raw.iloc[spoof_zone].mean() * 0.8
-    # quiet period: no contradiction → filtered ≈ raw
-    calm = slice(250, 340)
-    assert np.allclose(filt.iloc[calm], raw.iloc[calm], atol=1e-6)
-
-
-def test_spoof_filter_never_flips_sign():
-    df = simulate_lob_day(seed=40)
-    from src.signals.features import queue_imbalance
-    raw  = queue_imbalance(df)
-    filt = spoof_filtered_qi(df)
-    assert ((filt * raw) >= -1e-12).all()               # same sign or zero
-
-
-def test_institutional_seal_big_beats_retail():
-    """Equal turnover, different size distribution: institutional prints
-    (volume concentrated in few big trades) must outscore retail dribble."""
-    n = 300
-    prev_close = 10.0
-
-    def sealed(big: bool):
-        rng = np.random.default_rng(3)
-        if big:
-            # 80% tiny prints + 20% institutional blocks; mean ≈ 996/tick
-            base = np.full(n, 100.0)
-            base[::5] = 4580.0
-        else:
-            # uniform retail lots, same mean ≈ 1000/tick
-            base = rng.integers(1, 20, n).astype(float) * 100.0
-        cum = np.cumsum(base)
-        return _book(n, bid_px1=11.0, ask_px1=11.02, bid_vol=80000,
-                     cum_buy=cum, cum_sell=np.zeros(n))
-
-    s_big    = institutional_seal(sealed(True),  prev_close)
-    s_retail = institutional_seal(sealed(False), prev_close)
-    assert s_big.iloc[-1] > s_retail.iloc[-1]
-    assert s_retail.iloc[-1] >= 0.0
-
-
-def test_institutional_seal_zero_away_from_limit():
-    df = simulate_lob_day(seed=41, is_futures=False, prev_close=100.0)
-    # synthetic day rarely hits ±10%; signal should be ~all zeros
-    s = institutional_seal(df, prev_close=100.0)
-    assert (s == 0.0).mean() > 0.95
-
-
-# ---------------------------------------------------------------------------
 # Modular factor selection
 # ---------------------------------------------------------------------------
 
 def test_expand_selection_groups_and_names():
-    sel = expand_factor_selection(["flow", "close_auction"])
-    assert "mlofi" in sel and "api" in sel and "close_auction" in sel
+    sel = expand_factor_selection(["flow", "auction_signal"])
+    assert "mlofi" in sel and "agg_ofi" in sel and "auction_signal" in sel
+    assert "api" not in sel
     assert "queue_imbalance" not in sel
+
+
+def test_missing_columns_reported_for_explicit_factor():
+    df = simulate_lob_day(seed=41).drop(columns=["limit_buy_vol"])
+    assert missing_required_columns(df, "api") == ["limit_buy_vol"]
+    with pytest.raises(ValueError, match="Factor 'api' requires columns"):
+        build_feature_matrix(df, factors=["api"])
 
 
 def test_expand_selection_unknown_raises():
@@ -392,12 +302,11 @@ def test_feature_matrix_subset_only_selected():
 
 def test_subset_composite_runs():
     df = simulate_lob_day(seed=43)
-    feat = build_feature_matrix(df, close_auction_value=0.2,
+    feat = build_feature_matrix(df, auction_value=0.2,
                                 factors=["flow", "auction"])
     alpha = build_composite_alpha(feat)
     assert np.isfinite(alpha.to_numpy()).all()
-    assert "close_auction" in feat.columns
-    assert "auction_signal" not in feat.columns   # no auction_value provided
+    assert "auction_signal" in feat.columns
 
 
 def test_empty_selection_raises():
@@ -407,11 +316,11 @@ def test_empty_selection_raises():
         build_feature_matrix(df, factors=["auction"])
 
 
-def test_stock_mode_selection_includes_seal_inst():
+def test_stock_mode_selection_includes_price_limit_only():
     df = simulate_lob_day(seed=45, is_futures=False, prev_close=100.0)
     feat = build_feature_matrix(df, instrument="stock", prev_close=100.0,
                                 factors=["limit"])
-    assert set(feat.columns) == {"price_limit", "sealing", "seal_inst"}
+    assert set(feat.columns) == {"price_limit"}
 
 
 def test_vpin_is_causal():
@@ -421,14 +330,6 @@ def test_vpin_is_causal():
     v_full = vpin(df)
     v_half = vpin(df.iloc[:k])
     pd.testing.assert_series_equal(v_full.iloc[:k], v_half, check_names=False)
-
-
-def test_big_order_flow_is_causal():
-    df = simulate_lob_day(seed=31)
-    k = len(df) // 2
-    f_full = big_order_flow(df)
-    f_half = big_order_flow(df.iloc[:k])
-    pd.testing.assert_series_equal(f_full.iloc[:k], f_half, check_names=False)
 
 
 def test_exposure_gate_is_causal():

@@ -16,22 +16,27 @@ Key insight:
   which can be spoofed cheaply.
 
   Empirically (MDPI Entropy 2020, "Trading Imbalance in Chinese Stock
-  Market—A High-Frequency View"):
-    - Auction buy/sell imbalance predicts next-day returns
-    - Opening gap continuation lasts ~20–30 min then mean-reverts
-    - Small-cap effect: imbalance signal stronger for mid/small-caps
+  Market—A High-Frequency View"), auction buy/sell imbalance predicts
+  next-day returns and is stronger for mid/small-caps.
 
   For futures (IF/IC): T+0 allows capitalising on directional signal
   immediately after 09:30 open within the same trading day.
 """
 
-import numpy as np
 import pandas as pd
 
 
 def auction_imbalance(auction_df: pd.DataFrame) -> float:
     """
-    Buy/sell volume imbalance at end of call auction.
+    Buy/sell imbalance at end of call auction.
+
+    When available, use the paper's count polarity:
+
+        (NOB - NOS) / (NOB + NOS)
+
+    with NOB/NOS represented by `cum_buy_count` / `cum_sell_count`.
+    Volume columns are accepted only for older auction fixtures that do not
+    yet carry participant/order counts.
 
     Returns float in [-1, +1]:
         +1 → pure buy pressure
@@ -42,8 +47,12 @@ def auction_imbalance(auction_df: pd.DataFrame) -> float:
     non-cancellable orders submitted after 09:20.
     """
     final = auction_df.iloc[-1]
-    buy  = float(final["cum_buy_vol"])
-    sell = float(final["cum_sell_vol"])
+    if "cum_buy_count" in auction_df.columns and "cum_sell_count" in auction_df.columns:
+        buy = float(final["cum_buy_count"])
+        sell = float(final["cum_sell_count"])
+    else:
+        buy  = float(final["cum_buy_vol"])
+        sell = float(final["cum_sell_vol"])
     total = buy + sell
     if total == 0.0:
         return 0.0
@@ -60,81 +69,10 @@ def auction_gap(auction_df: pd.DataFrame, open_price: float) -> float:
     Negative → gapped down.
 
     Clip interpretation: gaps > 5% on A-shares often indicate
-    price-limit approach dynamics next session, not pure momentum.
+    price-limit state risk next session, not pure momentum.
     """
     prev_close = float(auction_df["prev_close"].iloc[0])
     return (open_price - prev_close) / prev_close
-
-
-def auction_composite(
-    auction_df: pd.DataFrame,
-    open_price: float,
-    imbalance_weight: float = 0.65,
-    gap_weight: float = 0.35,
-) -> float:
-    """
-    Composite auction signal: imbalance + gap direction.
-
-    Default weights: imbalance dominates (more manipulation-resistant).
-    Gap clipped at ±5% before normalisation to avoid price-limit outliers.
-
-    Returns scalar in [-1, +1].
-    """
-    imb    = auction_imbalance(auction_df)
-    gap    = auction_gap(auction_df, open_price)
-    gap_n  = float(np.clip(gap / 0.05, -1.0, 1.0))   # normalize to ±1
-
-    composite = imbalance_weight * imb + gap_weight * gap_n
-    return float(np.clip(composite, -1.0, 1.0))
-
-
-def close_auction_imbalance(close_df: pd.DataFrame) -> float:
-    """
-    Buy/sell volume imbalance at the end of the CLOSING call auction (14:57–15:00).
-
-    China added a closing call auction in 2018 (SSE/SZSE). Index-rebalance flow,
-    ETF creation/redemption hedges, and end-of-day informed positioning concentrate
-    here, so the closing imbalance predicts the OVERNIGHT return and the next-day
-    open gap — the mirror of the opening-auction edge on the other information window.
-
-    Returns float in [-1, +1] from the final closing snapshot.
-    Strongest for index constituents on rebalance days.
-    """
-    final = close_df.iloc[-1]
-    buy  = float(final["cum_buy_vol"])
-    sell = float(final["cum_sell_vol"])
-    total = buy + sell
-    if total == 0.0:
-        return 0.0
-    return (buy - sell) / total
-
-
-def close_auction_signal_series(
-    lob_df: pd.DataFrame,
-    close_auction_value: float,
-    half_life_min: float = 30.0,
-) -> pd.Series:
-    """
-    Carry the prior session's closing-auction imbalance into today's session as a
-    decaying prior, anchored at the 09:30 open.
-
-        s(t) = close_auction_value · exp(-ln2 · t / t_{1/2})
-
-    where t is minutes since 09:30. The closing imbalance predicts the overnight
-    move; by the open much of it is realised, so the residual prior decays over the
-    first ~30 min. Positive → prior-close buy pressure → bullish bias into the open.
-
-    Returns Series aligned to lob_df.index.
-    """
-    open_ts   = lob_df.index[0]
-    elapsed_m = (lob_df.index - open_ts).total_seconds() / 60.0
-    decay     = np.exp(-np.log(2.0) * elapsed_m / half_life_min)
-
-    return pd.Series(
-        close_auction_value * decay,
-        index=lob_df.index,
-        name="close_auction",
-    )
 
 
 def auction_signal_series(
@@ -143,26 +81,16 @@ def auction_signal_series(
     half_life_min: float = 20.0,
 ) -> pd.Series:
     """
-    Project scalar auction signal onto continuous LOB timestamps
-    with exponential decay.
+    Project the paper-defined auction imbalance onto continuous timestamps.
 
-        s(t) = auction_value · exp(-ln2 · t / t_{1/2})
-
-    where t is minutes elapsed since 09:30.
-
-    Half-life of ~20 min calibrated to Chinese A-share data
-    (imbalance information fully absorbed by ~09:50–10:00).
-    Use shorter half-life (10 min) for index futures where price
-    discovery is faster.
+    The cited papers define the auction imbalance scalar; they do not define
+    a fitted intraday decay curve. `half_life_min` is retained only for
+    backward-compatible call sites and is intentionally ignored.
 
     Returns Series aligned to lob_df.index.
     """
-    open_ts   = lob_df.index[0]
-    elapsed_m = (lob_df.index - open_ts).total_seconds() / 60.0
-    decay     = np.exp(-np.log(2.0) * elapsed_m / half_life_min)
-
     return pd.Series(
-        auction_value * decay,
+        float(auction_value),
         index=lob_df.index,
         name="auction_signal",
     )

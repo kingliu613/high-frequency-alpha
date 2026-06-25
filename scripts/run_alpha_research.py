@@ -29,11 +29,9 @@ warnings.filterwarnings("ignore")
 from src.data.synthetic  import (
     simulate_lob_day,
     simulate_auction_data,
-    simulate_close_auction_data,
-    simulate_etf_series,
 )
-from src.signals.auction import auction_composite, close_auction_imbalance
-from src.signals.advanced import exposure_gate, vpin, kyle_lambda
+from src.signals.auction import auction_imbalance
+from src.signals.advanced import exposure_gate, vpin
 from src.signals.composite import build_feature_matrix, build_composite_alpha
 from src.backtest.metrics import (
     compute_forward_returns,
@@ -64,7 +62,6 @@ def run_day(
     seed: int = 42,
     verbose: bool = True,
     params: Optional[MarketParams] = None,
-    use_etf: bool = False,
     signal_strength: float = 0.01,
     use_gate: bool = False,
     factors=None,
@@ -81,14 +78,7 @@ def run_day(
         seed=seed,
         signal_strength=signal_strength,
     )
-    auc_val = auction_composite(auction_df, open_price)
-
-    # Prior-session closing auction (14:57–15:00) carried into today's open as a
-    # decaying overnight prior. Same seed/price level stands in for the prior day.
-    close_df, _ = simulate_close_auction_data(
-        ticker=ticker, date=date, day_close=open_price, seed=seed
-    )
-    close_val = close_auction_imbalance(close_df)
+    auc_val = auction_imbalance(auction_df)
 
     if params is None:
         params = MarketParams.default_for(
@@ -98,18 +88,14 @@ def run_day(
             max_hold = 20,
         )
 
-    etf_series = simulate_etf_series(lob_df, seed=seed) if use_etf else None
-
     # --- Features ---
     feat_df = build_feature_matrix(
         lob_df,
         auction_value         = auc_val,
-        close_auction_value   = close_val,
         ofi_levels            = 5,
         ofi_window            = 10,
         prev_close            = float(open_price) if not is_futures else None,
         instrument            = params.instrument,
-        etf_series            = etf_series,
         factors               = factors,
     )
     composite = build_composite_alpha(feat_df)
@@ -140,7 +126,7 @@ def run_day(
         print(f"\nDate: {date}   Ticker: {ticker}   "
               f"{'Futures' if is_futures else 'Stock'}")
         print(f"Snapshots: {len(lob_df):,}   Auction signal: {auc_val:+.4f}   "
-              f"Close-auction prior: {close_val:+.4f}")
+              f"Features: {len(feat_df.columns)}")
         if use_gate and gate is not None:
             v = vpin(lob_df)
             print(f"Gate: mean scale={gate.mean():.2f}   "
@@ -374,14 +360,13 @@ def main() -> None:
     ap.add_argument("--ticker",   default="IF2401.CFFEX")
     ap.add_argument("--days",        type=int,   default=20)
     ap.add_argument("--walkforward", action="store_true")
-    ap.add_argument("--etf",         action="store_true", help="include ETF basis signal")
     ap.add_argument("--gate",        action="store_true",
                     help="apply VPIN + Kyle-λ exposure gate to position sizing")
     ap.add_argument("--factors",     default=None,
                     help="comma-separated factor groups and/or factor names "
-                         "(e.g. 'flow,auction' or 'mlofi,api,close_auction'). "
+                         "(e.g. 'flow,auction' or 'mlofi,api,auction_signal'). "
                          "Groups: flow, book, behavior, auction, limit, "
-                         "interaction, etf. Default: all.")
+                         "interaction. Default: all.")
     ap.add_argument(
         "--signal-strength", type=float, default=0.01,
         help="Synthetic data: coupling between latent flow and price/LOB. "
@@ -395,8 +380,8 @@ def main() -> None:
     hdr("HFT Alpha Research — Chinese Market")
     print("  Instrument : " + ("CSI 300 Futures (IF) on CFFEX" if is_futures
                                 else "A-share (long-only, T+1)"))
-    print("  Signals    : Multi-Level OFI · Auction Imbalance · Micro-Price")
-    print("               Queue Imbalance · Depth Tilt · Momentum")
+    print("  Signals    : Strict alpha = OFI · Trade Polarity · API/OEI")
+    print("               Gates/diagnostics are explicit opt-ins")
     print("  Data       : Synthetic Chinese L2 (3-second, 10-level LOB)")
 
     ss = args.signal_strength
@@ -419,7 +404,7 @@ def main() -> None:
         print(f"\n  Factor selection: {factors}")
 
     run_day(date=args.date, ticker=ticker, is_futures=is_futures,
-            verbose=True, use_etf=args.etf, signal_strength=ss,
+            verbose=True, signal_strength=ss,
             use_gate=args.gate, factors=factors)
 
     if args.multiday:
@@ -432,11 +417,11 @@ def main() -> None:
 
     hdr("Done")
     print("  Next steps:")
-    print("  1. Replace simulate_lob_day() with real Wind/Tushare L2 feed")
+    print("  1. Replace simulate_lob_day() with real L2 feed including counts and order events")
     print("  2. Grid-search ofi_levels, ofi_window, entry_z, max_hold")
     print("  3. Validate IC on 6+ months out-of-sample before trading live")
-    print("  4. For stocks: add 融券 (margin short) or ETF-arb pairs")
-    print("  5. For futures: add basis spread (IF vs spot ETF 510300)")
+    print("  4. Audit event-column mappings against the exchange/vendor schema")
+    print("  5. Re-run paper formula checks before adding any new factor")
 
 
 if __name__ == "__main__":

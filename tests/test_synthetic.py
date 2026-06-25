@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pandas as pd
 import pytest
-from src.data.synthetic import simulate_lob_day, simulate_etf_series
+from src.data.synthetic import simulate_lob_day
 
 
 def test_signal_strength_default_is_001():
@@ -21,18 +21,20 @@ def test_lob_vol_has_persistence():
     assert lag1_corr > 0.3, f"Expected lag-1 autocorr > 0.3, got {lag1_corr:.3f}"
 
 
-def test_simulate_etf_series_returns_series():
-    df = simulate_lob_day(seed=0)
-    etf = simulate_etf_series(df, seed=0)
-    assert isinstance(etf, pd.Series)
-    assert len(etf) == len(df)
-    assert etf.index.equals(df.index)
-
-
-def test_simulate_etf_series_premium_is_small():
-    """ETF should trade within ±3% of mid (AR(1) σ=10bps)."""
-    df = simulate_lob_day(seed=0)
-    mid = (df["bid_px_1"] + df["ask_px_1"]) / 2.0
-    etf = simulate_etf_series(df, seed=0)
-    premium = (etf / mid - 1.0).abs()
-    assert premium.max() < 0.03, f"Max premium {premium.max():.4f} too large"
+def test_lob_has_exact_factor_inputs():
+    df = simulate_lob_day(seed=42)
+    required = {
+        "cum_buy_count",
+        "cum_sell_count",
+        "buy_count",
+        "sell_count",
+        "limit_buy_vol",
+        "limit_sell_vol",
+        "cancel_buy_vol",
+        "cancel_sell_vol",
+        "market_buy_vol",
+        "market_sell_vol",
+        "bid_depth",
+        "ask_depth",
+    }
+    assert required.issubset(df.columns)

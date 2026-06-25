@@ -32,8 +32,14 @@ def run_akshare(ticker: str) -> None:
     lob_df = load_tick_day_akshare(ticker)
     print(f"  {len(lob_df):,} snapshots loaded")
 
-    # Only 5 levels available from AKShare — cap ofi_levels
-    feat = build_feature_matrix(lob_df, ofi_levels=5, ofi_window=10)
+    # AKShare tick data has trade-side counts but no real order-event stream.
+    # Strict mode therefore uses only the paper polarity factor here.
+    feat = build_feature_matrix(
+        lob_df,
+        ofi_levels=1,
+        ofi_window=10,
+        factors=["trade_imbalance"],
+    )
     comp = build_composite_alpha(feat)
 
     fwd  = compute_forward_returns(lob_df, horizons=[1, 5, 10, 20, 40])
@@ -65,24 +71,10 @@ def run_baostock(ticker: str, start: str, end: str) -> None:
         return
     print(f"  {len(df):,} bars loaded")
 
-    # With 5-min bars: OFI unreliable (no real LOB), use momentum + micro-price
-    feat = build_feature_matrix(df, ofi_levels=1, ofi_window=3)
+    print("  No strict intraday paper factors are available on 5-min OHLCV bars.")
+    print("  Use tick/order-event data for OFI, trade polarity, API, OEI, VPIN, and Kyle lambda.")
+    return
 
-    # Drop LOB-heavy features, keep price-based ones
-    price_feats = [c for c in feat.columns if c in
-                   ("micro_price_dev", "mom_5", "mom_20", "trade_imbalance")]
-    if not price_feats:
-        print("  No usable features on 5-min data")
-        return
-
-    comp = build_composite_alpha(feat[price_feats])
-
-    fwd = compute_forward_returns(df, horizons=[1, 3, 6, 12, 24])
-    ic  = ic_by_horizon(comp, fwd)
-
-    print("\nComposite IC by horizon (5-min bars):")
-    for h, v in ic.items():
-        print(f"  {h:>4} bars ({h*5:>4} min): {v:+.4f}")
 
 
 def main() -> None:

@@ -18,24 +18,21 @@ from src.signals.daily import (
 @pytest.fixture(scope="module")
 def one_day():
     lob = simulate_lob_day(seed=42, is_futures=False, prev_close=100.0)
-    feat = build_feature_matrix(lob, auction_value=0.1, close_auction_value=0.2,
+    feat = build_feature_matrix(lob, auction_value=0.1,
                                 prev_close=100.0, instrument="stock")
     return lob, feat
 
 
 def test_aggregate_produces_mean_and_tail(one_day):
     lob, feat = one_day
-    row = aggregate_daily_factors(feat, lob, auction_value=0.1,
-                                  close_auction_value=0.2)
-    assert "api" in row and "api_tail" in row
-    assert "big_flow" in row and "big_flow_tail" in row
+    row = aggregate_daily_factors(feat, lob, auction_value=0.1)
+    assert "mlofi" in row and "mlofi_tail" in row
+    assert "trade_imbalance" in row and "trade_imbalance_tail" in row
     assert row["auction_imb"] == 0.1
-    assert row["close_auction_imb"] == 0.2
     assert row["day_rv"] >= 0.0
-    assert "sealing_max" in row
     assert row["open"] > 0 and row["close"] > 0
     # decay-shape columns excluded
-    assert "auction_signal" not in row and "close_auction" not in row
+    assert "auction_signal" not in row
 
 
 def test_aggregate_all_finite(one_day):

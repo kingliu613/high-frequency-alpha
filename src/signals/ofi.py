@@ -117,18 +117,44 @@ def aggregated_ofi(
 
 def trade_imbalance(lob_df: pd.DataFrame, window: int = 20) -> pd.Series:
     """
-    Trade-based imbalance using cumulative executed buy/sell volume.
+    Paper-exact transaction polarity from buy/sell participant counts.
 
-    TI = (ΣBuyVol - ΣSellVol) / (ΣBuyVol + ΣSellVol)  over rolling window.
+    Following "Trading Imbalance in Chinese Stock Market--A High-Frequency
+    View", polarity over an interval is
 
-    Complements LOB-based OFI: LOB captures intent, trades capture execution.
-    Both signals together reduce false positives from spoofing/layering.
+        (NOB - NOS) / (NOB + NOS)
+
+    where NOB and NOS are the numbers of buyer-initiated and seller-initiated
+    participants/orders in the interval. `window` is the interval length in
+    snapshots; use a 20-snapshot window for 1-minute data at 3s cadence.
+
+    Required columns:
+      - cumulative counts: `cum_buy_count`, `cum_sell_count`, or
+      - per-snapshot counts: `buy_count`, `sell_count`.
     """
-    dv_buy  = lob_df["cum_buy_vol"].diff().clip(lower=0)
-    dv_sell = lob_df["cum_sell_vol"].diff().clip(lower=0)
+    if "cum_buy_count" in lob_df.columns and "cum_sell_count" in lob_df.columns:
+        db = lob_df["cum_buy_count"].astype(float).diff().clip(lower=0).fillna(0.0)
+        ds = lob_df["cum_sell_count"].astype(float).diff().clip(lower=0).fillna(0.0)
+    elif "buy_count" in lob_df.columns and "sell_count" in lob_df.columns:
+        db = lob_df["buy_count"].astype(float).clip(lower=0).fillna(0.0)
+        ds = lob_df["sell_count"].astype(float).clip(lower=0).fillna(0.0)
+    elif "cum_buy_vol" in lob_df.columns and "cum_sell_vol" in lob_df.columns:
+        # Volume fallback: Wind L2 3-second bars provide buy/sell volume but
+        # not participant counts. Volume-weighted polarity is NOT the paper
+        # NOB/NOS formula but is the best available approximation when count
+        # data is absent. Downstream composite normalisation reduces the bias.
+        db = lob_df["cum_buy_vol"].astype(float).diff().clip(lower=0).fillna(0.0)
+        ds = lob_df["cum_sell_vol"].astype(float).diff().clip(lower=0).fillna(0.0)
+    else:
+        raise ValueError(
+            "trade_imbalance requires buy/sell count columns for the paper "
+            "polarity formula: cum_buy_count/cum_sell_count or buy_count/sell_count. "
+            "Volume fallback (cum_buy_vol/cum_sell_vol) is also accepted but is "
+            "not the paper-exact formula."
+        )
 
-    rb = dv_buy.rolling(window, min_periods=5).sum()
-    rs = dv_sell.rolling(window, min_periods=5).sum()
+    rb = db.rolling(window, min_periods=max(1, window // 4)).sum()
+    rs = ds.rolling(window, min_periods=max(1, window // 4)).sum()
 
     total = (rb + rs).replace(0.0, np.nan)
     return ((rb - rs) / total).fillna(0.0).rename("trade_imbalance")

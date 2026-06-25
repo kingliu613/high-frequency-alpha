@@ -35,9 +35,8 @@ warnings.filterwarnings("ignore")
 from src.data.synthetic import (
     simulate_lob_day,
     simulate_auction_data,
-    simulate_close_auction_data,
 )
-from src.signals.auction import auction_composite, close_auction_imbalance
+from src.signals.auction import auction_imbalance
 from src.signals.composite import build_feature_matrix
 from src.signals.daily import (
     aggregate_daily_factors,
@@ -72,18 +71,11 @@ def simulate_universe(n_stocks: int, n_days: int, signal_strength: float = 0.01)
             lob_df = simulate_lob_day(
                 ticker=ticker, date=date, prev_close=open_px,
                 is_futures=False, seed=seed, signal_strength=signal_strength)
-            auc_val = auction_composite(auction_df, open_px)
-
-            close_df, _ = simulate_close_auction_data(
-                ticker=ticker, date=date,
-                day_close=float((lob_df["bid_px_1"].iloc[-1] + lob_df["ask_px_1"].iloc[-1]) / 2),
-                seed=seed)
-            close_val = close_auction_imbalance(close_df)
+            auc_val = auction_imbalance(auction_df)
 
             feat_df = build_feature_matrix(
                 lob_df,
                 auction_value=auc_val,
-                close_auction_value=close_val,
                 ofi_levels=5,
                 prev_close=pc,
                 instrument="stock",
@@ -92,7 +84,6 @@ def simulate_universe(n_stocks: int, n_days: int, signal_strength: float = 0.01)
             row = aggregate_daily_factors(
                 feat_df, lob_df,
                 auction_value=auc_val,
-                close_auction_value=close_val,
             )
             row["date"]   = date
             row["ticker"] = ticker

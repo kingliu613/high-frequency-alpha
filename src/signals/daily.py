@@ -16,7 +16,7 @@ For every tick-level factor column two daily values are produced:
                                           horizon, empirically strongest
                                           for flow factors in A-shares)
 Plus scalar factors that are already daily by construction:
-    auction_imb, close_auction_imb, day_rv, sealing_max
+    auction_imb, day_rv
 
 Return conventions (T+1 reality)
 --------------------------------
@@ -46,7 +46,6 @@ def aggregate_daily_factors(
     feat_df: pd.DataFrame,
     lob_df: pd.DataFrame,
     auction_value: Optional[float] = None,
-    close_auction_value: Optional[float] = None,
     tail_minutes: float = TAIL_MINUTES,
 ) -> dict:
     """
@@ -56,12 +55,12 @@ def aggregate_daily_factors(
     ----------
     feat_df  : output of build_feature_matrix() for one stock-day
     lob_df   : the matching LOB frame (for prices / tail window)
-    auction_value, close_auction_value : daily scalars passed through
+    auction_value : daily scalar passed through
     tail_minutes : size of the end-of-day window for the _tail aggregates
 
     Returns dict of daily factor values + open/close prices for return
-    construction. Time-decayed prior columns (auction_signal/close_auction)
-    are excluded — their daily mean is just the decay shape, not information.
+    construction. The intraday `auction_signal` projection is excluded because
+    the daily scalar is passed through separately as `auction_imb`.
     """
     mid = (lob_df["bid_px_1"].astype(float) + lob_df["ask_px_1"].astype(float)) / 2.0
 
@@ -74,7 +73,7 @@ def aggregate_daily_factors(
         "close": float(mid.iloc[-1]),
     }
 
-    skip = {"auction_signal", "close_auction"}   # decay shapes, not daily info
+    skip = {"auction_signal"}   # scalar daily info is carried as auction_imb
     for col in feat_df.columns:
         if col in skip:
             continue
@@ -85,17 +84,11 @@ def aggregate_daily_factors(
     # Scalar daily factors
     if auction_value is not None:
         row["auction_imb"] = float(auction_value)
-    if close_auction_value is not None:
-        row["close_auction_imb"] = float(close_auction_value)
 
     # Day realized variance from mid returns (annualisation-free, cross-
     # sectionally comparable)
     r = np.log(mid.replace(0.0, np.nan)).diff()
     row["day_rv"] = float((r ** 2).sum())
-
-    # Sealing: max over the day (was the board sealed, how hard)
-    if "sealing" in feat_df.columns:
-        row["sealing_max"] = float(feat_df["sealing"].max())
 
     return row
 

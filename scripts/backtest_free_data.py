@@ -83,8 +83,6 @@ def build_5min_signals(df: pd.DataFrame) -> pd.DataFrame:
 
     intrabar_dir : (close - open) / prev_close  — intrabar directional pressure
     vol_ratio    : volume / 20-bar rolling mean  — volume surge indicator
-    mom_5        : 5-bar return (25 min)
-    mom_20       : 20-bar return (100 min)
     open_gap     : (open - prev_close) / prev_close — gap from prior close
     bar_range    : (high - low) / prev_close  — intrabar volatility
     """
@@ -99,8 +97,6 @@ def build_5min_signals(df: pd.DataFrame) -> pd.DataFrame:
     feats = pd.DataFrame(index=df.index)
     feats["intrabar_dir"] = (c - o) / prev_c.replace(0, np.nan)
     feats["vol_ratio"]    = v / v.rolling(20, min_periods=5).mean()
-    feats["mom_5"]        = c.pct_change(5)
-    feats["mom_20"]       = c.pct_change(20)
     feats["open_gap"]     = (o - prev_c) / prev_c.replace(0, np.nan)
     feats["bar_range"]    = (h - lo) / prev_c.replace(0, np.nan)
 
@@ -132,13 +128,12 @@ def run_baostock_backtest(start: str = "2023-07-01", end: str = "2024-01-01") ->
         # Forward returns at 1, 5, 10, 20 bars
         fwd = {h: c.shift(-h) / c - 1 for h in [1, 5, 10, 20]}
 
-        # Composite: equal-weight intrabar_dir + vol_ratio + mom_5
+        # Composite from paper-backed/free-data proxies only.
         # (vol_ratio sign: high vol + positive intrabar = bullish)
         comp = (
-            feats.get("intrabar_dir", pd.Series(0, index=feats.index)) * 0.40 +
-            feats.get("vol_ratio",    pd.Series(0, index=feats.index)) * 0.20 +
-            feats.get("mom_5",        pd.Series(0, index=feats.index)) * 0.25 +
-            feats.get("open_gap",     pd.Series(0, index=feats.index)) * 0.15
+            feats.get("intrabar_dir", pd.Series(0, index=feats.index)) * 0.50 +
+            feats.get("vol_ratio",    pd.Series(0, index=feats.index)) * 0.25 +
+            feats.get("open_gap",     pd.Series(0, index=feats.index)) * 0.25
         ).fillna(0)
 
         # IC per signal per horizon

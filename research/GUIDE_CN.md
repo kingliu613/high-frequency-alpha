@@ -1,102 +1,79 @@
-# 因子库中文导读(零代码基础版)
+# 因子库中文导读
 
-> 目标读者:不太懂代码、但要全面理解这个高频因子库逻辑的人。
-> 配套深度文档:`research/hft_factors_china.md`(因子目录+文献来源)。
+> 目标读者：不太懂代码、但要理解当前高频因子库逻辑的人。
+> 当前默认因子库只保留有清晰公式、字段和过程依据的方向因子。
 
 ---
 
-## 一、整体逻辑:一条流水线
+## 一、整体逻辑
 
 ```
- ① 数据          ② 因子            ③ 合成           ④ 回测           ⑤ 评估
- 行情快照   →   17 个信号    →   加权总分    →   模拟交易    →   有没有用?
- (盘口10档)     (每个一个数)     (-3~+3 分)      (含T+1/手续费)    (IC/夏普)
+数据快照 -> 因子 -> 加权合成 -> 回测 -> IC/夏普评估
 ```
 
-把市场想成两条排队的人龙:买方队伍(bid)和卖方队伍(ask)。
-每 3 秒拍一张照片(快照),记录两边各 10 个价位排了多少量、刚才谁成交了。
-**因子 = 看照片猜下一步价格往哪走的一种"读法"。**
+把市场想成两条排队的人龙：买方队伍 bid 和卖方队伍 ask。
+每 3 秒拍一张照片，记录两边各 10 个价位排了多少量，以及刚才谁成交了。
+因子就是用这些照片和成交记录猜下一步价格方向的一种读法。
 
 ---
 
 ## 二、文件地图
 
-| 文件 | 干什么 | 必读程度 |
-|---|---|---|
-| `research/hft_factors_china.md` | 因子总目录 + 中国市场规则 | ★★★ 入口 |
-| `src/data/synthetic.py` | 造模拟行情(练手/测试用) | ★★ 读前60行 |
-| `src/data/loader.py` | 接真实数据(AKShare/BaoStock) | ★ 用到再看 |
-| `src/signals/features.py` | 基础盘口因子 | ★★★ |
-| `src/signals/ofi.py` | 订单流因子(OFI 家族) | ★★★ |
-| `src/signals/auction.py` | 开盘/尾盘集合竞价因子 | ★★ |
-| `src/signals/advanced.py` | 高级因子(大单/封单/VPIN/交互) | ★★★ |
-| `src/signals/composite.py` | 因子合成 + 权重 + 分组选择 | ★★★ |
-| `src/signals/daily.py` | 日频化 → 截面选股(老板要的用法) | ★★ |
-| `src/backtest/engine.py` | 回测引擎(T+1、涨跌停、费用) | ★★ 只读文件头 |
-| `src/backtest/metrics.py` | IC、夏普等评估指标 | ★ |
-| `scripts/run_alpha_research.py` | 日内研究入口脚本 | 跑就行 |
-| `scripts/run_cross_sectional.py` | 截面选股入口脚本 | 跑就行 |
-| `tests/` | 自动测试(82个,验证逻辑没坏) | 不用读 |
-
-**读法窍门:每个函数顶部三引号 `"""..."""` 里是说明书(公式+原理+为什么中国市场成立)。只读说明书、跳过代码体,可懂 80%。**
+| 文件 | 干什么 |
+|---|---|
+| `research/hft_factors_china.md` | 当前因子目录 + 文献依据 |
+| `src/data/synthetic.py` | 造模拟行情,用于测试代码 |
+| `src/data/loader.py` | 接真实数据 |
+| `src/signals/ofi.py` | OFI 与成交失衡 |
+| `src/signals/features.py` | 队列失衡、涨跌停状态 |
+| `src/signals/auction.py` | 开盘集合竞价信号 |
+| `src/signals/advanced.py` | API、OEI、羊群、撤单、风险闸门 |
+| `src/signals/composite.py` | 因子权重、分组、合成 |
+| `src/signals/daily.py` | 日频聚合和截面评估 |
+| `src/backtest/engine.py` | T+1、费用、涨跌停约束 |
 
 ---
 
-## 三、17 个因子,六句话心法
+## 三、默认方向因子
 
-> **队列=意图(可造假),成交=真金白银,竞价=被锁定的承诺,
-> 单子大小=身份,撤单=慌张,跳价=过度反应。**
+### 看订单流
 
-每个因子是上面六个想法之一:
+- `mlofi`：多档订单流失衡，看盘口变化的净方向。
+- `agg_ofi`：一段时间内累计的 OFI，看持续压力。
+- `trade_imbalance`：按论文公式计算买方人数/订单数 vs 卖方人数/订单数的 polarity。
 
-### 看队列(意图)
-- `queue_imbalance` 买队厚还是卖队厚
-- `depth_tilt` 靠近成交价的量谁多(远处的量是装饰)
-- `micro_price_dev` 公允价偏向哪边
-- `book_slope` 哪边的"墙"更陡
-- `resiliency` 队列被吃掉后谁回补快
+### 看成交/挂单结构
 
-### 看成交(真金白银)
-- `trade_imbalance` 主动买 vs 主动卖
-- `mlofi` / `agg_ofi` 队列增减的净方向(瞬间/持续)
-- `api` 吃单的人 ÷ 挂单的人(激进度)
-- `oei` 哪边队列被吃得快
-- `big_flow` 只数大单 → 机构足迹(大单净额)
+- `api`：显式订单事件里的吃单量相对挂单供给。
+- `oei`：按 Chi 论文的 `L-C-M` 事件公式比较买卖两侧。
 
-### 看竞价(锁定的承诺)
-- `auction_signal` 开盘竞价失衡(9:20后不可撤单=真实意图)
-- `close_auction` 尾盘竞价失衡 → 预测隔夜(T+1 最好用)
+## 四、诊断项和标签，不进默认合成
 
-### 看行为(人性)
-- `herding` 羊群同向程度(散户 80% 的市场特别灵)
-- `mom_5` 超短动量(噪音多,权重极小)
-- `signed_jump` 跳涨/跳跌后赌回吐(反向因子)
-
-### 看涨跌停(中国特色)
-- `price_limit` 接近涨跌停的动量
-- `sealing` 封单强度(打板)
-- `seal_inst` 机构封单 vs 散户封单(交互因子,独家层)
-
-### 看撤单(慌张)
-- `cancel_spike` 单边撤单爆发(中国撤单率低→爆发=强信号)
-- `qi_filtered` 队列失衡 × 撤单过滤(防 spoofing 假墙,独家层)
-
-### 仅控制仓位、不判方向(闸门)
-- `vpin` 订单流毒性(0~1,高=危险→减仓)
-- `kyle_lambda` 价格冲击(市场薄→减仓)
-- `exposure_gate` 上面两个合成一个 0.2~1 的仓位系数
+- `queue_imbalance`：最优买一队列 vs 卖一队列谁更厚，只作为盘口诊断。
+- `herding`：单票 LSV 风格读数只作诊断；严格复现需要截面或投资者群体数据。
+- `cancel_spike`：单边撤单爆发只作诊断；还不是 spoofing 论文里的完整检测器。
+- `auction_signal`：开盘集合竞价失衡只保留为标量或诊断，不默认投进日内 alpha。
+- `price_limit`：是否已经触及涨停/跌停状态，是标签或交易约束，不是默认方向因子。
 
 ---
 
-## 四、合成与分组
+## 五、只控制仓位，不判方向
 
-`composite.py` 里两张表看懂就行:
+- `vpin`：按 BVC 和等成交量桶计算订单流毒性。高时说明市场更危险。
+- `kyle_lambda`：原始 Kyle lambda 是单位成交量造成的价格冲击；仓位闸门会另行标准化。
+- `exposure_gate`：把 VPIN 和 Kyle lambda 合成 0.2-1.0 的仓位系数。
 
-1. **`DEFAULT_WEIGHTS`** — 谁占多少权重(总和=1)。成交确认类权重最大(最难造假)。
-2. **`FACTOR_GROUPS`** — 七个组:`flow` 订单流 / `book` 盘口结构 / `behavior` 行为 /
-   `auction` 竞价 / `limit` 涨跌停 / `interaction` 交互(独家层)/ `etf` ETF。
+---
 
-挑子集用 `--factors`,权重自动重新归一,任何子集都是独立可跑的策略:
+## 六、合成与分组
+
+`composite.py` 里三张表最重要:
+
+1. `FACTOR_REGISTRY`: 每个因子的论文、公式、字段、角色和严格支持状态。
+2. `DEFAULT_WEIGHTS`: 默认方向因子权重，总和为 1。
+3. `FACTOR_GROUPS`: 可选分组：`alpha`, `flow`, `book`, `behavior`, `auction`, `limit`, `interaction`, `gate`, `diagnostic`, `label`。
+
+示例：
 
 ```bash
 python3 scripts/run_alpha_research.py --factors flow,auction
@@ -104,33 +81,9 @@ python3 scripts/run_alpha_research.py --factors flow,auction
 
 ---
 
-## 五、回测里的中国规则(engine.py 替你管住的事)
+## 七、必须记住的诚实警告
 
-- **T+1**:股票当天买不能当天卖 → 股票模式一天只能 1 笔,持到收盘
-- **涨跌停**:封死涨停时买不进(没有卖盘)
-- **费用**:印花税 0.05%(只卖方收)、佣金、滑点(吃穿盘口)、市场冲击
-- **闸门**:VPIN/λ 高 → 自动缩小仓位甚至禁止开仓
-
----
-
-## 六、三个必须记住的诚实警告
-
-1. **合成数据 IC 是假的**:模拟器里同一个隐藏变量既推价格又造盘口("循环耦合"),
-   任何盘口因子必然"预测"成功。合成数据只能验证代码没写错,不能证明赚钱。
-2. **样本量**:验证因子至少 20 天 × 30–50 只股票;说"策略赚钱"至少 6 个月样本外。
-3. **公开因子不稀缺**:文献里的因子全行业都在挖。独家在 `interaction` 组
-   (交互/条件化)和数据质量、执行成本控制。
-
----
-
-## 七、学习路径清单(打勾用)
-
-- [ ] 读完本文 + `hft_factors_china.md` 第 1 节(市场规则表)
-- [ ] 跑 `python3 scripts/run_alpha_research.py`,看懂输出的 IC 排名表
-- [ ] 跑 `--factors flow` 对比全因子,体会分组
-- [ ] 跑 `--stock`,观察 T+1 下只有 1 笔交易
-- [ ] 读 `features.py` 里 `queue_imbalance` 的说明书(最简单的因子)
-- [ ] 读 `advanced.py` 文件头的因子清单
-- [ ] 改 `composite.py` 里任一权重 → 重跑 → 看 IC 变化
-- [ ] 能用自己的话回答:因子是什么?为什么 17 个?综合分怎么算?
-      为什么回测赚钱≠真赚钱?
+1. 合成数据只能验证代码流程，不能证明赚钱。
+2. 股票有 T+1，日内股票回转不现实；日内交易更适合期货。
+3. 高频因子必须用真实 L2 数据做样本外检验。
+4. 涨跌停、手续费、滑点、市场冲击会显著改变结果。

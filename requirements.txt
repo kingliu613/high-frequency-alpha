@@ -1,5 +1,25 @@
+# Core
 numpy>=1.24.0
 pandas>=2.0.0
+scipy>=1.10.0
+statsmodels>=0.14.0
+
+# Visualization
 matplotlib>=3.7.0
 seaborn>=0.12.0
+
+# Utilities
 tqdm>=4.65.0
+
+# A-share data sources (install as needed)
+tushare>=1.2.89          # Tushare Pro — daily/monthly prices, financials, index
+baostock>=0.8.8          # BaoStock — free historical 5-min bars
+akshare>=1.12.0          # AKShare — free tick data and alternative data
+
+# HFT data (optional)
+# pyarrow>=14.0.0        # Parquet I/O for large tick data
+# fastparquet>=2023.0    # Alternative Parquet backend
+
+# Factor library / backtest (future)
+# alphalens-reloaded>=0.4.3   # Factor evaluation (IC, turnover)
+# pyfolio-reloaded>=0.9.5     # Portfolio analytics
